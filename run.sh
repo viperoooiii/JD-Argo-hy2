@@ -52,14 +52,30 @@ prepare() {
 }
 
 install_self() {
-  local command_path
+  local command_path source_file temp_source=''
   for command_path in /usr/local/bin/jd /usr/local/bin/jdxz; do
     if [[ -e $command_path || -L $command_path ]] \
       && ! grep -q 'jd-node-managed' "$command_path" 2>/dev/null; then
       die "$command_path 已被其他程序占用，请先处理命令冲突。"
     fi
   done
-  install -m 755 "$0" "$APP_DIR/run.sh"
+  source_file=$0
+  # `bash <(curl ...)` executes from a pipe. Reading $0 again copies only the
+  # unread tail, so fetch a complete copy for the persistent jd/jdxz commands.
+  if [[ ! -f $source_file || -L $source_file || $source_file == /dev/fd/* ]]; then
+    temp_source=$(mktemp)
+    if ! curl -fL --retry 3 --connect-timeout 15 --max-time 60 \
+      -o "$temp_source" \
+      'https://raw.githubusercontent.com/viperoooiii/JD-Argo-hy2/main/run.sh'; then
+      rm -f "$temp_source"
+      die '无法下载完整管理脚本。'
+    fi
+    source_file=$temp_source
+  fi
+  [[ -s $source_file ]] || die '管理脚本为空，已停止安装。'
+  bash -n "$source_file" || die '管理脚本语法检查失败，已停止安装。'
+  install -m 755 "$source_file" "$APP_DIR/run.sh"
+  [[ -z $temp_source ]] || rm -f "$temp_source"
   cat >/usr/local/bin/jd <<'EOF'
 #!/usr/bin/env bash
 # jd-node-managed

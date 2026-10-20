@@ -23,6 +23,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/viperoooiii/JD-Argo-hy2/main
 
 已通过旧版脚本安装的 VPS，重新运行上方一键命令并选择原来安装的选项，即可添加 `jdxz` 命令；运行中的节点及其链接会保留。`jdxz` 只清理由本仓库创建的服务和文件，不会卸载其他脚本的节点。系统历史 journal 日志由系统管理，不随 `jdxz` 清除。
 
+若使用早期版本通过 `bash <(curl …)` 安装后，`jd` 报错或没有输出，可直接修复管理脚本：
+
+```bash
+sudo curl -fsSL https://raw.githubusercontent.com/viperoooiii/JD-Argo-hy2/main/run.sh -o /opt/jd-node/run.sh
+sudo chmod 755 /opt/jd-node/run.sh
+sudo jd
+```
+
 ## 注意
 
 - Argo 使用 Cloudflare Quick Tunnel，无需域名或 Tunnel Token。它适合临时使用；隧道进程重新建立后域名会变化，届时重新运行 `jd` 并更新客户端链接。Cloudflare 不保证 Quick Tunnel 的可用性。
