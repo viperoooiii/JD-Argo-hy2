@@ -52,9 +52,13 @@ prepare() {
 }
 
 install_self() {
-  if [[ -e /usr/local/bin/jd ]] && ! grep -q 'jd-node-managed' /usr/local/bin/jd 2>/dev/null; then
-    die '/usr/local/bin/jd 已被其他程序占用，请先处理命令冲突。'
-  fi
+  local command_path
+  for command_path in /usr/local/bin/jd /usr/local/bin/jdxz; do
+    if [[ -e $command_path || -L $command_path ]] \
+      && ! grep -q 'jd-node-managed' "$command_path" 2>/dev/null; then
+      die "$command_path 已被其他程序占用，请先处理命令冲突。"
+    fi
+  done
   install -m 755 "$0" "$APP_DIR/run.sh"
   cat >/usr/local/bin/jd <<'EOF'
 #!/usr/bin/env bash
@@ -62,6 +66,12 @@ install_self() {
 exec /opt/jd-node/run.sh --show "$@"
 EOF
   chmod 755 /usr/local/bin/jd
+  cat >/usr/local/bin/jdxz <<'EOF'
+#!/usr/bin/env bash
+# jd-node-managed
+exec /opt/jd-node/run.sh --uninstall "$@"
+EOF
+  chmod 755 /usr/local/bin/jdxz
 }
 
 download() {
@@ -170,6 +180,7 @@ EOF
   "$BIN_DIR/xray" run -test -config "$CONFIG_DIR/xray.json"
 
   cat >"$SYSTEMD_DIR/jd-xray.service" <<EOF
+# jd-node-managed
 [Unit]
 Description=JD Xray Argo origin
 After=network-online.target
@@ -186,6 +197,7 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
   cat >"$SYSTEMD_DIR/jd-argo.service" <<EOF
+# jd-node-managed
 [Unit]
 Description=JD Cloudflare Quick Tunnel
 After=network-online.target jd-xray.service
@@ -262,6 +274,7 @@ masquerade:
     rewriteHost: true
 EOF
   cat >"$SYSTEMD_DIR/jd-hy2.service" <<EOF
+# jd-node-managed
 [Unit]
 Description=JD Hysteria2 server
 After=network-online.target
@@ -280,8 +293,61 @@ EOF
   systemctl daemon-reload
   systemctl enable --now jd-hy2.service
   systemctl is-active --quiet jd-hy2.service || die 'Hysteria2 服务启动失败。'
-  if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
-    ufw allow "$HY2_PORT/udp"
+  if command -v ufw >/dev/null && ufw status | grep -q '^Status: active' \
+    && ! ufw status | grep -Eq "^${HY2_PORT}/udp[[:space:]]+ALLOW"; then
+    ufw allow "$HY2_PORT/udp" comment 'jd-node'
+    printf 'HY2_UFW_MANAGED=1\n' >>"$STATE_DIR/hy2.env"
+  fi
+}
+
+uninstall_all() {
+  require_root
+  command -v systemctl >/dev/null || die '找不到 systemctl，无法安全停止服务。'
+  local service unit command_path managed=0 HY2_UFW_MANAGED=0
+
+  # Only stop units created by this project. Older releases had no marker,
+  # so their ExecStart path is also accepted as proof of ownership.
+  for service in jd-argo jd-xray jd-hy2; do
+    unit="$SYSTEMD_DIR/$service.service"
+    if [[ -f $unit ]] && grep -Fq "$APP_DIR/" "$unit"; then
+      systemctl stop "$service.service" || die "无法停止 $service，未继续删除其文件。"
+      if systemctl is-active --quiet "$service.service"; then
+        die "$service 仍在运行，已停止卸载。"
+      fi
+      systemctl disable "$service.service" >/dev/null
+      rm -f -- "$unit"
+      managed=1
+    elif [[ -f $unit ]]; then
+      printf '保留非本脚本创建的服务：%s\n' "$unit" >&2
+    fi
+  done
+  systemctl daemon-reload
+  systemctl reset-failed jd-argo.service jd-xray.service jd-hy2.service >/dev/null 2>&1 || true
+
+  if [[ -f $STATE_DIR/hy2.env ]]; then
+    # shellcheck disable=SC1091
+    . "$STATE_DIR/hy2.env"
+    if [[ ${HY2_UFW_MANAGED:-0} == 1 ]] && command -v ufw >/dev/null; then
+      ufw --force delete allow "$HY2_PORT/udp" >/dev/null 2>&1 || \
+        printf '未能移除 UFW 的 UDP %s 规则，请手动检查。\n' "$HY2_PORT" >&2
+    fi
+  fi
+
+  [[ $APP_DIR == /opt/jd-node ]] || die '应用目录不符合预期，停止删除。'
+  if [[ -d $APP_DIR || -L $APP_DIR ]]; then
+    rm -rf -- "$APP_DIR"
+    managed=1
+  fi
+  for command_path in /usr/local/bin/jd /usr/local/bin/jdxz; do
+    if [[ -f $command_path ]] && grep -q 'jd-node-managed' "$command_path" 2>/dev/null; then
+      rm -f -- "$command_path"
+      managed=1
+    fi
+  done
+  if ((managed)); then
+    printf 'JD 节点服务、文件和命令已卸载。\n'
+  else
+    printf '未找到由本脚本安装的内容。\n'
   fi
 }
 
@@ -318,12 +384,17 @@ show_nodes() {
 }
 
 main() {
+  if [[ ${1:-} == --uninstall ]]; then
+    [[ $# -eq 1 ]] || die 'jdxz 不接受额外参数。'
+    uninstall_all
+    return
+  fi
   if [[ ${1:-} == --show ]]; then
     show_nodes
     return
   fi
   if [[ ${1:-} == --help ]]; then
-    printf '用法：bash run.sh（交互菜单），安装后执行 sudo jd 查看节点信息。\n'
+    printf '用法：bash run.sh（交互菜单）；安装后执行 sudo jd 查看节点，sudo jdxz 完全卸载。\n'
     return
   fi
   [[ $# -eq 0 ]] || die '未知参数。运行 bash run.sh --help 查看用法。'
